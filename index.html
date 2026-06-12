@@ -711,9 +711,16 @@ async function gsSyncAll(){
 
     // 북크닉신청 시트 → bnBookReqs 동기화
     if(d['북크닉신청']){
-      bnBookReqs = d['북크닉신청'].map(r=>({
-        month:r['month']||r['신청월']||'', name:r['name']||r['이름']||'', ts:r['ts']||r['신청시간']||''
-      }));
+      bnBookReqs = d['북크닉신청'].map(r=>{
+        let m = r['month']||r['신청월']||'';
+        // 숫자(2026.06 → 2026.6)로 변환된 경우 문자열 YYYY.MM으로 복원
+        if(typeof m === 'number'){
+          const parts = m.toFixed(2).split('.');
+          m = parts[0] + '.' + (parts[1].length===1 ? '0'+parts[1] : parts[1]);
+        }
+        m = String(m);
+        return {month:m, name:String(r['name']||r['이름']||''), ts:String(r['ts']||r['신청시간']||'')};
+      });
     }
 
     // 자유의견 시트 → bnOpinions 동기화
