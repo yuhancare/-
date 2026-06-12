@@ -626,7 +626,7 @@ let rentals = JSON.parse(localStorage.getItem('rentals') || 'null') || INIT_RENT
 let oldBooks = JSON.parse(localStorage.getItem('oldBooks') || 'null') || INIT_OLD;
 // 버전 관리로 localStorage 캐시 완전 초기화
 (function(){
-  const VER = 'v6_260609f';
+  const VER = 'v6_gsheets_v1';
   if(localStorage.getItem('dashVer') !== VER){
     ['hqBooks','riBooks','oldBooks','rentals','bnRounds','bnMembers','bookReqs','bnBookReqs'].forEach(k=>localStorage.removeItem(k));
     localStorage.setItem('dashVer', VER);
@@ -645,6 +645,103 @@ function saveAll(){
   localStorage.setItem('bnBookReqs', JSON.stringify(bnBookReqs));
 }
 
+// ===================== GOOGLE SHEETS SYNC =====================
+const GS_API_URL = 'https://script.google.com/macros/s/AKfycbzxoA7nJG99NLQMae3He2sA7lBgqvFuxOn_uBOoy7bmdgouqO2x3rNmC_a3i6yIKmT0Ww/exec';
+
+function gsWrite(type, data){
+  fetch(GS_API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'write', type, data})
+  }).catch(err=>console.warn('GS write 실패:', err));
+}
+
+function gsUpdate(type, key, value, data){
+  fetch(GS_API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'update', type, key, value, data})
+  }).catch(err=>console.warn('GS update 실패:', err));
+}
+
+function gsDelete(type, key, value){
+  fetch(GS_API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'delete', type, key, value})
+  }).catch(err=>console.warn('GS delete 실패:', err));
+}
+
+// 복합 조건(예: month+name) 삭제 - Apps Script의 deleteCombo 액션 사용
+function gsDeleteCombo(type, conditions){
+  fetch(GS_API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'deleteCombo', type, conditions})
+  }).catch(err=>console.warn('GS deleteCombo 실패:', err));
+}
+
+// 시트에서 전체 데이터 읽어와 로컬 데이터 동기화
+async function gsSyncAll(){
+  try{
+    const res = await fetch(GS_API_URL + '?action=readAll');
+    const json = await res.json();
+    if(!json.ok) return;
+    const d = json.data;
+
+    // 대여등록 시트 → rentals 동기화 (시트가 source of truth)
+    if(d['대여등록'] && d['대여등록'].length){
+      rentals = d['대여등록'].map(r=>({
+        순번:String(r['순번']||''), 구분:r['구분']||'', 제목:r['제목']||'',
+        대여자:r['대여자']||'', 대여일:r['대여일']||'', 반납일:r['반납일']||'',
+        반납여부: r['반납여부']||'X'
+      }));
+    }
+
+    // 도서신청 시트 → bookReqs 동기화
+    if(d['도서신청'] && d['도서신청'].length){
+      bookReqs = d['도서신청'].map(r=>({
+        순번:String(r['순번']||''), 구분:r['구분']||'', 도서명:r['도서명']||'',
+        저자:r['저자']||'', 출판사:r['출판사']||'', 출판년도:String(r['출판년도']||''),
+        가격:String(r['가격']||''), 신청인소속:r['신청인소속']||'',
+        직무연관성:r['직무연관성']||'', 입고여부:r['입고여부']||'', 비고:r['비고']||'',
+        신청인: r['신청인']||''
+      }));
+    }
+
+    // 북크닉신청 시트 → bnBookReqs 동기화
+    if(d['북크닉신청']){
+      bnBookReqs = d['북크닉신청'].map(r=>({
+        month:r['month']||r['신청월']||'', name:r['name']||r['이름']||'', ts:r['ts']||r['신청시간']||''
+      }));
+    }
+
+    // 자유의견 시트 → bnOpinions 동기화
+    if(d['자유의견']){
+      bnOpinions = d['자유의견'].map(r=>({
+        name:r['name']||r['이름']||'익명', text:r['text']||r['의견']||'', ts:r['ts']||r['작성시간']||''
+      }));
+      localStorage.setItem('bnOpinions', JSON.stringify(bnOpinions));
+    }
+
+    saveAll();
+
+    // 현재 보고 있는 페이지 다시 렌더
+    if(currentPage==='dashboard') renderDashboard();
+    if(currentPage==='books') renderBooksTable();
+    if(currentPage==='return-add') renderReturnPage();
+    if(currentPage==='bookreq') renderBookReq();
+    if(currentPage==='booknic'){ renderBooknic(); renderBnReqList(); renderBnOpinions(); }
+  }catch(err){
+    console.warn('GS sync 실패:', err);
+  }
+}
+
+// 5초마다 자동 동기화 (다른 사람 입력 실시간 반영)
+setInterval(gsSyncAll, 5000);
+// 초기 1회 동기화
+setTimeout(gsSyncAll, 500);
+
 // ===================== BOOKNIC OPINION =====================
 let bnOpinions = JSON.parse(localStorage.getItem('bnOpinions') || '[]');
 
@@ -652,12 +749,14 @@ function submitBnOpinion(){
   const name = document.getElementById('bn-opinion-name').value.trim();
   const text = document.getElementById('bn-opinion-text').value.trim();
   if(!text){ toast('의견을 입력해주세요'); return; }
-  bnOpinions.push({
+  const newOp = {
     name: name || '익명',
     text,
     ts: new Date().toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
-  });
+  };
+  bnOpinions.push(newOp);
   localStorage.setItem('bnOpinions', JSON.stringify(bnOpinions));
+  gsWrite('자유의견', newOp);
   document.getElementById('bn-opinion-name').value='';
   document.getElementById('bn-opinion-text').value='';
   renderBnOpinions();
@@ -691,6 +790,8 @@ function toggleOpinionTime(el){
 
 function deleteBnOpinion(idx){
   if(!confirm('이 의견을 삭제할까요?')) return;
+  const o = bnOpinions[idx];
+  gsDeleteCombo('자유의견', {ts:o.ts, name:o.name});
   bnOpinions.splice(idx,1);
   localStorage.setItem('bnOpinions', JSON.stringify(bnOpinions));
   renderBnOpinions();
@@ -709,6 +810,7 @@ function submitBnReq(){
     toast('이미 신청하셨습니다! 😊');return;
   }
   bnBookReqs.push({month, name, ts: new Date().toLocaleString('ko-KR', {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})});
+  gsWrite('북크닉신청', {month, name, ts: bnBookReqs[bnBookReqs.length-1].ts});
 
   // 신청 월(예: 2026.06 → 6)로 회차 라벨 매칭
   const moInt = parseInt(month.split('.')[1]);
@@ -798,6 +900,7 @@ function cancelBnReq(month, name){
       member['스탬프'][targetRound.label] = '';
     }
   }
+  gsDeleteCombo('북크닉신청', {month, name});
   saveAll(); renderBnReqList(); renderBooknic(); toast(name+' 신청 취소');
 }
 
@@ -879,6 +982,8 @@ function returnBook(idx){
   rentals[idx].반납여부='O';
   rentals[idx].반납일=s;
   saveAll();
+  // 시트 업데이트 (제목+대여자+대여일로 행 찾기 위해 update 사용 - key는 순번)
+  gsUpdate('대여등록','순번',rentals[idx].순번,{반납여부:'O',반납일:s});
   renderReturnPage();
   renderDashboard();
   toast('반납 처리 완료! ✅');
@@ -1042,8 +1147,8 @@ function submitBookReq(){
   const loc = document.getElementById('req-loc').value;
   if(!title){toast('도서명을 입력하세요');return;}
   if(!loc){toast('소속을 선택하세요');return;}
-  bookReqs.push({
-    순번: String(bookReqs.length+1),
+  const newReq = {
+    순번: String(Date.now()),
     구분: document.getElementById('req-cat').value.trim(),
     도서명: title,
     저자: document.getElementById('req-author').value.trim(),
@@ -1054,8 +1159,10 @@ function submitBookReq(){
     직무연관성: document.getElementById('req-rel').value,
     입고여부: '',
     비고: ''
-  });
+  };
+  bookReqs.push(newReq);
   saveReqs();
+  gsWrite('도서신청', newReq);
   ['req-cat','req-title','req-author','req-pub','req-year','req-price'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('req-loc').value='';
   document.getElementById('req-rel').value='N';
@@ -1066,12 +1173,14 @@ function submitBookReq(){
 function toggleIngko(idx){
   bookReqs[idx].입고여부 = bookReqs[idx].입고여부==='Y' ? '' : 'Y';
   saveReqs();
+  gsUpdate('도서신청','순번',bookReqs[idx].순번,{입고여부:bookReqs[idx].입고여부});
   renderBookReq();
 }
 
 function deleteBookReq(idx){
   const r = bookReqs[idx];
   if(!confirm(`"${r.도서명}" 신청을 삭제할까요?`)) return;
+  gsDelete('도서신청','순번',r.순번);
   bookReqs.splice(idx, 1);
   saveReqs();
   renderBookReq();
@@ -1355,6 +1464,7 @@ function markReturned(idx){
   rentals[idx].반납여부='O';
   rentals[idx].반납일=s;
   saveAll();
+  gsUpdate('대여등록','순번',rentals[idx].순번,{반납여부:'O',반납일:s});
   renderRentalTable();
   toast('반납 처리 완료!');
 }
@@ -1363,6 +1473,7 @@ function markUnreturned(idx){
   rentals[idx].반납여부='X';
   rentals[idx].반납일='';
   saveAll();
+  gsUpdate('대여등록','순번',rentals[idx].순번,{반납여부:'X',반납일:''});
   renderRentalTable();
   toast('미반납으로 복귀했습니다.');
 }
@@ -1370,6 +1481,7 @@ function markUnreturned(idx){
 function deleteRental(idx){
   const r = rentals[idx];
   if(!confirm(`"${r.제목}" (${r.대여자}) 대여 기록을 삭제할까요?`)) return;
+  gsDelete('대여등록','순번',r.순번);
   rentals.splice(idx, 1);
   saveAll();
   renderRentalTable();
@@ -1580,8 +1692,10 @@ function registerRental(){
   if(!person){toast('대여자 이름을 입력하세요');return;}
   if(!dateVal){toast('대여일을 선택하세요');return;}
   const fmt=d=>d.replace(/-/g,'.');
-  rentals.push({순번:String(rentals.length+1),제목:title,대여자:person,대여일:fmt(dateVal),반납일:returnVal?fmt(returnVal):'',반납여부:'X'});
+  const newRental = {순번:String(Date.now()),구분:'',제목:title,대여자:person,대여일:fmt(dateVal),반납일:returnVal?fmt(returnVal):'',반납여부:'X'};
+  rentals.push(newRental);
   saveAll();
+  gsWrite('대여등록', newRental);
   clearRentForm();
   toast('대여 등록 완료: '+title+' ('+person+')');
 }
@@ -1665,16 +1779,20 @@ function toggleStamp(mi, ri, curVal){
     if(newVal === ''){
       // 빈칸 → 신청 목록 제거
       bnBookReqs = bnBookReqs.filter(r=>!(r.name===name && r.month===monthStr));
+      gsDeleteCombo('북크닉신청', {month:monthStr, name});
     } else if(newVal === 'O'){
       // O → 신청 목록에 없으면 추가
       if(!bnBookReqs.find(r=>r.name===name && r.month===monthStr)){
-        bnBookReqs.push({month:monthStr, name,
+        const newReq = {month:monthStr, name,
           ts: new Date().toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
-        });
+        };
+        bnBookReqs.push(newReq);
+        gsWrite('북크닉신청', newReq);
       }
     } else if(newVal === 'X'){
       // X → 신청 목록 제거
       bnBookReqs = bnBookReqs.filter(r=>!(r.name===name && r.month===monthStr));
+      gsDeleteCombo('북크닉신청', {month:monthStr, name});
     }
   }
   saveAll();
